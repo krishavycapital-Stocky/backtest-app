@@ -2,15 +2,18 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 import warnings
+import io
 warnings.filterwarnings('ignore')
-from strategy import load_data, run_backtest
+from strategy import load_data_from_df, run_backtest
 
 st.set_page_config(page_title="NIFTY Backtest Dashboard", layout="wide")
 st.title("📈 NIFTY Backtesting Dashboard")
 
 with st.sidebar:
     st.header("⚙️ Settings")
-    parquet_file = st.text_input("Parquet file path", value="data.parquet")
+
+    # File uploader
+    uploaded_file = st.file_uploader("Upload your parquet file", type=["parquet"])
 
     st.subheader("Timeframe")
     tf_choice   = st.selectbox("Resample to", ["15min", "30min", "1h", "4h", "1D"])
@@ -38,27 +41,44 @@ with st.sidebar:
         adx_period, adx_threshold = 14, 25
 
     st.subheader("Capital & Lots")
-    capital  = st.number_input("Starting Capital (₹)", value=100000, step=10000)
-    lot_size = st.number_input("Lot Size", value=15, step=1,
-                                help="Auto-filled if found in data. NIFTY=75, BNF=15, FINNIFTY=40")
-    num_lots = st.number_input("Number of Lots", value=1, step=1)
+    capital      = st.number_input("Starting Capital (₹)", value=100000, step=10000)
+    lot_size     = st.number_input("Lot Size", value=15, step=1,
+                                    help="NIFTY=65, BANKNIFTY=15, FINNIFTY=40")
+    num_lots     = st.number_input("Number of Lots", value=1, step=1)
     position_pct = st.slider("Position size %", 10, 100, 95) / 100
 
     run_btn = st.button("▶ Run Backtest", use_container_width=True, type="primary")
 
+# Main panel
+if not uploaded_file:
+    st.info("👈 Upload your parquet file in the sidebar to get started")
+    st.markdown("""
+    **How to use:**
+    - Upload your NIFTY or BANKNIFTY parquet file
+    - Select timeframe (15min recommended to start)
+    - Pick a strategy
+    - Set lot size correctly for your instrument
+    - Click ▶ Run Backtest
+
+    **Lot sizes (as of 2024-25):**
+    - NIFTY = 75 (check current)
+    - BANKNIFTY = 15
+    - FINNIFTY = 40
+    - MIDCPNIFTY = 50
+    """)
+    st.stop()
+
 if run_btn:
-    with st.spinner("Running backtest..."):
+    with st.spinner("Loading data and running backtest..."):
         try:
-            df, detected_lot = load_data(parquet_file, resample_tf=resample_tf)
+            raw_df = pd.read_parquet(io.BytesIO(uploaded_file.read()))
+            df, detected_lot = load_data_from_df(raw_df, resample_tf=resample_tf)
             st.caption(f"Loaded {len(df)} candles on {tf_choice} timeframe")
+            if detected_lot:
+                st.sidebar.info(f"Suggestion from symbol: lot size may be {detected_lot} — please verify")
         except Exception as e:
             st.error(f"Could not load data: {e}")
             st.stop()
-
-        # Use detected lot size if found in data
-        if detected_lot:
-            st.sidebar.success(f"Lot size detected from data: {detected_lot}")
-            lot_size = detected_lot
 
         try:
             stats, bt = run_backtest(
@@ -104,7 +124,6 @@ if run_btn:
     trades = stats.get('_trades')
     if trades is not None and not trades.empty:
         t = trades.copy()
-
         t['Entry Date']  = pd.to_datetime(t['EntryTime']).dt.strftime('%d-%b-%Y')
         t['Entry Time']  = pd.to_datetime(t['EntryTime']).dt.strftime('%H:%M')
         t['Exit Date']   = pd.to_datetime(t['ExitTime']).dt.strftime('%d-%b-%Y')
@@ -113,7 +132,7 @@ if run_btn:
         t['Exit Price']  = t['ExitPrice'].round(2)
         t['PnL (pts)']   = t['PnL'].round(2)
         t['PnL (₹)']     = (t['PnL'] * lot_size * num_lots).round(0).astype(int)
-        t['Return %']    = t['ReturnPct'].round(2)
+        t['Return %']    = (t['ReturnPct'] * 100).round(2)
 
         display = t[['Entry Date', 'Entry Time', 'Exit Date', 'Exit Time',
                       'Entry Price', 'Exit Price',
@@ -127,19 +146,18 @@ if run_btn:
             use_container_width=True, height=400
         )
 
-        # P&L Summary
-        total_rs   = int(t['PnL (₹)'].sum())
-        winning    = int((t['PnL (₹)'] > 0).sum())
-        losing     = int((t['PnL (₹)'] < 0).sum())
-        avg_trade  = int(total_rs / max(len(t), 1))
+        total_rs  = int(t['PnL (₹)'].sum())
+        winning   = int((t['PnL (₹)'] > 0).sum())
+        losing    = int((t['PnL (₹)'] < 0).sum())
+        avg_trade = int(total_rs / max(len(t), 1))
 
         st.divider()
         st.subheader("P&L Summary")
         s1, s2, s3, s4 = st.columns(4)
-        s1.metric("Total P&L",       f"₹{total_rs:,}")
-        s2.metric("Winning Trades",  str(winning))
-        s3.metric("Losing Trades",   str(losing))
-        s4.metric("Avg per Trade",   f"₹{avg_trade:,}")
+        s1.metric("Total P&L",      f"₹{total_rs:,}")
+        s2.metric("Winning Trades", str(winning))
+        s3.metric("Losing Trades",  str(losing))
+        s4.metric("Avg per Trade",  f"₹{avg_trade:,}")
 
     else:
         st.info("No trades with these parameters.")
@@ -147,6 +165,3 @@ if run_btn:
     with st.expander("Full stats"):
         clean = {k: str(v) for k, v in stats.items() if not str(k).startswith('_')}
         st.json(clean)
-
-else:
-    st.info("👈 Pick a timeframe + strategy and click ▶ Run Backtest")
